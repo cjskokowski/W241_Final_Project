@@ -1,0 +1,400 @@
+---
+title: "W241 Final Project Analysis"
+output: pdf_document
+---
+
+```{r}
+library(data.table)
+library(sandwich)
+library(lmtest)
+library(ggplot2)
+library(knitr)
+library(operators)
+library(dplyr)
+```
+
+```{r import raw data}
+data_1     <- fread("Raw-Data - data-1.csv")
+data_2     <- fread("Raw-Data - data-2.csv")
+full_data  <- rbind(data_1, data_2, fill=TRUE)
+
+setnames(full_data, "Campaign ID", "Campaign_ID")
+
+clean_data <- full_data[full_data$Day %!in% c(as.Date("2021-10-31"), as.Date("2021-11-6"), as.Date("2021-11-7"), as.Date("2021-11-8")), .(Age, Gender, Day, Campaign_ID, Reach, Impressions, Results)]
+
+clean_data[is.na(clean_data)] <- 0
+
+clean_data
+```
+
+```{r import key data}
+key_1     <- fread("Raw-Data - key-1.csv")
+key_2     <- fread("Raw-Data - key-2.csv")
+full_keys <- rbind(key_1, key_2, fill=TRUE)
+
+setnames(full_keys, c("Campaign ID", "Product Type"), c("Campaign_ID", "Product_Type"))
+
+clean_keys <- full_keys[, .(Campaign_ID, Product_Type, Assignment)]
+
+clean_keys
+```
+
+```{r merge raw data with key for product type and treatment group}
+agg_d <- merge(clean_data, clean_keys)
+agg_d
+```
+
+```{r un-aggregate data}
+
+age_column       <- c()
+gender_column    <- c()
+product_column   <- c()
+date_column      <- c()
+treatment_column <- c()
+click_column     <- c()
+
+for (i in seq(1, nrow(agg_d))) {
+  a <- agg_d$Age[i]
+  g <- agg_d$Gender[i]
+  p <- agg_d$Product_Type[i]
+  d <- agg_d$Day[i]
+  
+  t <- if(agg_d$Assignment[i] == 'Control') {0} else {1}
+  
+  r <- agg_d$Results[i]
+  imp <- agg_d$Impressions[i]
+
+  N_c <- r
+  N_nc <- imp-r
+  
+  a_data <- rep(c(a), times=imp)
+  g_data <- rep(c(g), times=imp)
+  p_data <- rep(c(p), times=imp)
+  d_data <- rep(c(d), times=imp)
+  
+  t_data <- rep(c(t), times=imp)
+  
+  c_data <- rep(c(1),times=N_c)
+  nc_data <- rep(c(0),times=N_nc)
+  click_data <- c(c_data, nc_data)
+
+  
+  age_column       <- c(age_column, a_data)
+  gender_column    <- c(gender_column, g_data)
+  product_column   <- c(product_column, p_data)
+  date_column      <- as.Date(c(date_column, d_data))
+  treatment_column <- c(treatment_column, t_data)
+  click_column     <- c(click_column, click_data)
+}
+
+d <- data.table(
+  'Age'       = age_column, 
+  'Gender'    = gender_column, 
+  'Product'   = product_column,
+  'Date'      = date_column,
+  'Treatment' = treatment_column,
+  'Click'     = click_column
+)
+d
+```
+
+```{r get counts for each subgroup}
+nrow(d[d$Treatment == 1 & d$Product == "Clothing", ])
+nrow(d[d$Treatment == 0 & d$Product == "Clothing", ])
+nrow(d[d$Treatment == 1 & d$Product == "Auto Care", ])
+nrow(d[d$Treatment == 0 & d$Product == "Auto Care", ])
+nrow(d[d$Treatment == 1 & d$Product == "Produce", ])
+nrow(d[d$Treatment == 0 & d$Product == "Produce", ])
+```
+
+```{r get ctr overall treatment groups}
+treatment_group_means <- d[ , .(ctr = mean(Click)), keyby = .(Treatment)]
+treatment_group_means
+```
+
+```{r get ctr for each subgroup}
+d[ , .(ctr = mean(Click)), keyby = .(Age, Product, Treatment)]
+```
+
+```{r get ctr for each treatment and product combination}
+product_group_means <- d[ , .(ctr = mean(Click)), keyby = .(Product, Treatment)]
+product_group_means
+```
+
+```{r plot ctr by treatment group}
+barplot(treatment_group_means$ctr, names.arg = c("Control", "Treatment"), main = "CTR by Assigned Group", ylim=c(0,0.03), ylab="Click-Through Rate", col="#69b3a1")
+```
+
+```{r plot ctr by gender}
+gender_group_means <- d[ , .(ctr = mean(Click)), keyby = .(Gender)]
+barplot(gender_group_means$ctr, names.arg = c("Female", "Male", "Unknown"), main = "CTR by Gender", ylim=c(0,0.03), ylab="Click-Through Rate", col="#69b3a1")
+```
+
+```{r plot ctr by age}
+age_group_means <- d[ , .(ctr = mean(Click)), keyby = .(Age)]
+barplot(age_group_means$ctr, names.arg = c("18-24", "25-34", "35-44", "45-54", "55-64", "65+"), main = "CTR by Age Group", ylim=c(0,0.035), ylab="Click-Through Rate", col="#69b3a1")
+```
+
+
+```{r build basic model for full dataset}
+mod_1 <- d[ , lm(Click ~ Treatment)]
+
+coeftest(mod_1, vcov = vcovHC)
+```
+
+```{r build basic model for clothing campaign data}
+mod_1_clothing <- d[d$Product == "Clothing", lm(Click ~ Treatment)]
+coeftest(mod_1_clothing, vcov = vcovHC)
+```
+
+```{r build basic model for autocare campaign data}
+mod_1_auto <- d[d$Product == "Auto Care", lm(Click ~ Treatment)]
+coeftest(mod_1_auto, vcov = vcovHC)
+```
+
+```{r build basic model for produce campaign data}
+mod_1_produce <- d[d$Product == "Produce", lm(Click ~ Treatment)]
+coeftest(mod_1_produce, vcov = vcovHC)
+```
+
+```{r build model with age feature}
+mod_2 <- d[ , lm(Click ~ Treatment + as.factor(Age))]
+
+coeftest(mod_2, vcov = vcovHC)
+```
+
+```{r build model with age feature for clothing campaign data}
+mod_2_clothing <- d[d$Product == "Clothing", lm(Click ~ Treatment + as.factor(Age))]
+coeftest(mod_2_clothing, vcov = vcovHC)
+```
+
+```{r build model with age feature for autocare campaign data}
+mod_2_auto <- d[d$Product == "Auto Care", lm(Click ~ Treatment + as.factor(Age))]
+coeftest(mod_2_auto, vcov = vcovHC)
+```
+
+```{r build model with age feature for produce campaign data}
+mod_2_produce <- d[d$Product == "Produce", lm(Click ~ Treatment + as.factor(Age))]
+coeftest(mod_2_produce, vcov = vcovHC)
+```
+
+```{r build model with all covariates}
+mod_3 <- d[ , lm(Click ~ Treatment + as.factor(Age) + as.factor(Gender))]
+
+coeftest(mod_3, vcov = vcovHC)
+```
+
+```{r build model with all covariates for clothing campaign data}
+mod_3_clothing <- d[d$Product == "Clothing", lm(Click ~ Treatment + as.factor(Age) + as.factor(Gender))]
+coeftest(mod_3_clothing, vcov = vcovHC)
+```
+
+```{r build model with all covariates for autocare campaign data}
+mod_3_auto <- d[d$Product == "Auto Care", lm(Click ~ Treatment + as.factor(Age) + as.factor(Gender))]
+coeftest(mod_3_auto, vcov = vcovHC)
+```
+
+```{r build model with all covariates for produce campaign data}
+mod_3_produce <- d[d$Product == "Produce", lm(Click ~ Treatment + as.factor(Age) + as.factor(Gender))]
+coeftest(mod_3_produce, vcov = vcovHC)
+```
+
+```{r build model to test effect of gender}
+mod_g <- d[, lm(Click ~ as.factor(Gender))]
+coeftest(mod_g, vcov = vcovHC)
+```
+
+```{r build model to test effect of gender on produce campaign}
+mod_g_produce <- d[d$Product=="Produce", lm(Click ~ as.factor(Gender))]
+coeftest(mod_g_produce, vcov = vcovHC)
+```
+
+```{r build model to test effect of gender on autocare campaign}
+mod_g_auto <- d[d$Product=="Auto Care", lm(Click ~ as.factor(Gender))]
+coeftest(mod_g_auto, vcov = vcovHC)
+```
+
+```{r build model to test effect of gender on clothing campaign}
+mod_g_clothing <- d[d$Product=="Clothing", lm(Click ~ as.factor(Gender))]
+coeftest(mod_g_clothing, vcov = vcovHC)
+```
+
+```{r build model to test effect of age}
+mod_a <- d[, lm(Click ~ as.factor(Age))]
+coeftest(mod_a, vcov = vcovHC)
+```
+
+```{r build model to test effect of age on produce campaign}
+mod_a_produce <- d[d$Product=="Produce", lm(Click ~ as.factor(Age))]
+coeftest(mod_a_produce, vcov = vcovHC)
+```
+
+```{r build model to test effect of age on autocare campaign}
+mod_a_auto <- d[d$Product=="Auto Care", lm(Click ~ as.factor(Age))]
+coeftest(mod_a_auto, vcov = vcovHC)
+```
+
+```{r build model to test effect of age on clothing campaign}
+mod_a_clothing <- d[d$Product=="Clothing", lm(Click ~ as.factor(Age))]
+coeftest(mod_a_clothing, vcov = vcovHC)
+```
+
+```{r get distribution of genders across treatment groups}
+gender_covariates <- as.data.frame(table(d$Gender, keyby = d$Treatment))
+setnames(gender_covariates, c("Var1", "keyby", "Freq"), c("Gender", "Treatment", "Count"))
+gender_covariates
+table(d$Gender, keyby = d$Treatment)
+```
+
+```{r plot distribution of genders across groups}
+gender_covariates <- table(d$Gender, keyby = d$Treatment)
+barplot(gender_covariates,
+        main = "Distribution of Gender by Treatment",
+        ylab = "Count",
+        col = c("#ffbb58", "#69b3a1", "#adadad"),
+        legend.text = rownames(gender_covariates),
+        args.legend = list(x = "top", cex = 0.7),
+        names.arg = c("Control", "Treatment"),
+        beside = TRUE, 
+        ylim=c(0, 35000)) # Grouped bars
+```
+
+```{r plot distribution of age across groups}
+age_covariates <- table(d$Age, keyby = d$Treatment)
+barplot(age_covariates,
+        main = "Distribution of Age by Treatment",
+        ylab = "Count",
+        col = c("#ffbb58", "#c44b4b", "#bd4bc4", "#4b9ac4", "#69b3a1", "#adadad"),
+        legend.text = rownames(age_covariates),
+        args.legend = list(x = "top", cex = 0.7),
+        names.arg = c("Control", "Treatment"),
+        beside = TRUE,
+        ylim=c(0, 20000)) # Grouped bars
+```
+
+```{r}
+product_table <- d[ , .(ctr = mean(Click)), keyby = .(Product, Treatment)]
+product_table
+```
+
+```{r plot ctr by product/treatment group combination}
+product_table <- d[ , .(ctr = mean(Click)), keyby = .(Treatment, Product)]
+barplot(product_table$ctr,
+        main = "CTR by Product",
+        ylab = "Click-Through Rate",
+        col = c("#4b9ac4", "#69b3a1", "#adadad"),
+        args.legend = list(x = "top", cex = 0.7),
+        legend.text = c("Autocare", "Clothing", "Produce"),
+        names.arg = c(" ", "Control", " ", " ", "Treatment", " "),
+        beside = TRUE,
+        ylim=c(0, 0.04)) # Grouped bars
+```
+
+```{r plot ctr by gender/treatment group combination}
+gender_table <- d[ , .(ctr = mean(Click)), keyby = .(Treatment, Gender)]
+
+barplot(gender_table$ctr,
+        main = "CTR by Gender",
+        ylab = "Click-Through Rate",
+        col = c("#4b9ac4", "#69b3a1", "#adadad"),
+        args.legend = list(x = "top", cex = 0.7),
+        legend.text = c("Female", "Male", "Unknown"),
+        names.arg = c(" ", "Control", " ", " ", "Treatment", " "),
+        beside = TRUE,
+        ylim=c(0, 0.04))
+```
+
+```{r plot ctr by age/treatment group combination}
+age_table <- d[ , .(ctr = mean(Click)), keyby = .(Treatment, Age)]
+
+barplot(age_table$ctr,
+        main = "CTR by Age",
+        ylab = "Click-Through Rate",
+        col = c("#ffbb58", "#c44b4b", "#bd4bc4", "#4b9ac4", "#69b3a1", "#adadad",  "#bd4bc4", "#4b9ac4", "#69b3a1", "#adadad"),
+        args.legend = list(x = "top", cex = 0.7),
+        legend.text = c("18-24", "25-34", "35-44", "45-54", "55-64", "65+"),
+        names.arg = c(" ", " " ," ", "Control", " ", " "," ", "Treatment", " ", " "),
+        beside = TRUE,
+        ylim=c(0, 0.06))
+```
+
+
+```{r conduct f-test on full dataset}
+short_model <- d[, lm(Treatment ~ 1)]
+long_model  <- d[, lm(Treatment ~ as.factor(Age) + as.factor(Gender))]
+
+anova(short_model, long_model, test = "F")
+```
+
+```{r conduct f-test on autocare campaign data}
+short_model_auto <- d[d$Product=="Auto Care", lm(Treatment ~ 1)]
+long_model_auto  <- d[d$Product=="Auto Care", lm(Treatment ~ as.factor(Age) + as.factor(Gender))]
+
+anova(short_model_auto, long_model_auto, test = "F")
+```
+
+```{r conduct f-test on clothing campaign data}
+short_model_clothing <- d[d$Product=="Clothing", lm(Treatment ~ 1)]
+long_model_clothing  <- d[d$Product=="Clothing", lm(Treatment ~ as.factor(Age) + as.factor(Gender))]
+
+anova(short_model_clothing, long_model_clothing, test = "F")
+```
+
+```{r conduct f-test on produce campaign data}
+short_model_produce <- d[d$Product=="Produce", lm(Treatment ~ 1)]
+long_model_produce  <- d[d$Product=="Produce", lm(Treatment ~ as.factor(Age) + as.factor(Gender))]
+
+anova(short_model_produce, long_model_produce, test = "F")
+```
+
+```{r get subgroup ATEs}
+d_t <- d[d$Treatment==1, .(ctr_t = mean(Click)), keyby = .(Product, Gender, Age)]
+d_c <- d[d$Treatment==0, .(ctr_c = mean(Click)), keyby = .(Product, Gender, Age)]
+d_tc <- merge(d_t, d_c, by=c("Product","Gender", "Age"))
+d_tc$ate <- (d_tc$ctr_t - d_tc$ctr_c)
+d_tc
+```
+
+```{r count number of participants in contradictory postive ATE subgroup (1/5)}
+d_f1 <- d[d$Product == "Auto Care"]
+d_f2 <- d_f1[d_f1$Gender == "unknown"]
+d_f3 <- d_f2[d_f2$Age == "35-44"]
+pos_count <- nrow(d_f3)
+pos_count
+```
+
+```{r count number of participants in contradictory postive ATE subgroup (2/5)}
+d_f1 <- d[d$Product == "Clothing"]
+d_f2 <- d_f1[d_f1$Gender == "female"]
+d_f3 <- d_f2[d_f2$Age == "65+"]
+pos_count <- pos_count + nrow(d_f3)
+nrow(d_f3)
+pos_count
+```
+
+```{r count number of participants in contradictory postive ATE subgroup (3/5)}
+d_f1 <- d[d$Product == "Clothing"]
+d_f2 <- d_f1[d_f1$Gender == "male"]
+d_f3 <- d_f2[d_f2$Age == "45-54"]
+pos_count <- pos_count + nrow(d_f3)
+nrow(d_f3)
+pos_count
+```
+
+```{r count number of participants in contradictory postive ATE subgroup (4/5)}
+d_f1 <- d[d$Product == "Clothing"]
+d_f2 <- d_f1[d_f1$Gender == "unknown"]
+d_f3 <- d_f2[d_f2$Age == "55-64"]
+pos_count <- pos_count + nrow(d_f3)
+nrow(d_f3)
+pos_count
+```
+
+```{r count number of participants in contradictory postive ATE subgroup (5/5)}
+d_f1 <- d[d$Product == "Produce"]
+d_f2 <- d_f1[d_f1$Gender == "female"]
+d_f3 <- d_f2[d_f2$Age == "35-44"]
+pos_count <- pos_count + nrow(d_f3)
+nrow(d_f3)
+pos_count
+```
